@@ -47,6 +47,35 @@ def _init_game(game_name: str, board_size: int | None = None) -> None:
 
 ALGO_CHOICES = ["submission", "minimax", "random"]
 
+
+def _existing_engine_path(*parts: str) -> str:
+    """Return the first existing engine path from build/ with platform suffix fallback."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = []
+    for name in parts:
+        candidates.append(os.path.join(root, "build", name))
+        if sys.platform == "win32" and not name.endswith(".exe"):
+            candidates.append(os.path.join(root, "build", name + ".exe"))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[0]
+
+
+def _resolve_player_alias(path: str, algo: str) -> tuple[str, str]:
+    """Map course-provided player aliases to local engines and algorithms."""
+    key = path.lower()
+    if key == "student":
+        return _existing_engine_path("minichess-ubgi"), "submission"
+    if key in {"ta", "tastrong", "strong"}:
+        return _existing_engine_path("minimax-strong-ubgi"), "minimax"
+    if key in {"taweak", "weak"}:
+        return _existing_engine_path("minimax-weak-ubgi"), "minimax"
+    if key == "boss":
+        return _existing_engine_path("boss-ubgi"), "minimax"
+    return path, algo
+
 # ---------------------------------------------------------------------------
 # Board display (game-specific)
 # ---------------------------------------------------------------------------
@@ -737,6 +766,9 @@ def main() -> None:
         verbose = args.verbose
     else:
         verbose = args.games == 1
+
+    args.white, args.white_algo = _resolve_player_alias(args.white, args.white_algo)
+    args.black, args.black_algo = _resolve_player_alias(args.black, args.black_algo)
 
     for label, path in [("--white", args.white), ("--black", args.black)]:
         if path != "human" and not os.path.isfile(path):
