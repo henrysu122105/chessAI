@@ -156,7 +156,7 @@ int State::evaluate(
                 int self_piece = self_board[r][c];
                 int oppn_piece = oppn_board[r][c];
                 self_score += simple_material[self_piece];
-                oppn_piece += simple_material[oppn_piece];
+                oppn_score += simple_material[oppn_piece];
             }
         }
     }
