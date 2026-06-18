@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <vector>
 #include <utility>
 #include "state.hpp"
 #include "minimax.hpp"
@@ -31,6 +32,193 @@ static bool captures_king(const State *state, const Move &move)
     int to_r = static_cast<int>(move.second.first);
     int to_c = static_cast<int>(move.second.second);
     return state->piece_at(opp, to_r, to_c) == 6;
+}
+
+static bool legal_move_exists(const State *state, const Move &move)
+{
+    return std::find(state->legal_actions.begin(), state->legal_actions.end(), move)
+        != state->legal_actions.end();
+}
+
+static bool try_opening_book(State *state, SearchResult &result)
+{
+    if (state->player != 1)
+    {
+        return false;
+    }
+
+    Move book_move;
+    bool found = false;
+
+    // Against the common b2-b3 opening, occupying c4 gives black a stable
+    // central pawn and avoids the weaker d5-d4 line seen in timed games.
+    if (state->piece_at(0, 3, 1) == 1
+        && state->piece_at(1, 1, 2) == 1
+        && state->piece_at(0, 2, 2) == 0
+        && state->piece_at(1, 2, 2) == 0)
+    {
+        book_move = Move(Point(1, 2), Point(2, 2)); // c5c4
+        found = true;
+    }
+    else if (state->piece_at(0, 2, 2) == 1
+        && state->piece_at(1, 1, 1) == 1)
+    {
+        book_move = Move(Point(1, 1), Point(2, 2)); // b5c4
+        found = true;
+    }
+    else if (state->piece_at(0, 3, 2) == 1
+        && state->piece_at(1, 1, 0) == 1
+        && state->piece_at(0, 2, 0) == 0
+        && state->piece_at(1, 2, 0) == 0)
+    {
+        book_move = Move(Point(1, 0), Point(2, 0)); // a5a4
+        found = true;
+    }
+
+    if (found && legal_move_exists(state, book_move))
+    {
+        result.best_move = book_move;
+        result.score = 0;
+        result.seldepth = 1;
+        result.nodes = 1;
+        result.pv = {result.best_move};
+        return true;
+    }
+    return false;
+}
+
+static bool is_capture_or_promotion(const State *state, const Move &move)
+{
+    int self = state->player;
+    int opp = 1 - self;
+    int from_r = static_cast<int>(move.first.first);
+    int from_c = static_cast<int>(move.first.second);
+    int to_r = static_cast<int>(move.second.first);
+    int to_c = static_cast<int>(move.second.second);
+    int moved = state->piece_at(self, from_r, from_c);
+    return state->piece_at(opp, to_r, to_c) != 0
+        || (moved == 1 && (to_r == 0 || to_r == state->board_h() - 1));
+}
+
+static std::vector<Move> ordered_actions(const State *state, bool tactical_only)
+{
+    std::vector<Move> actions;
+    actions.reserve(state->legal_actions.size());
+    for (const auto &action : state->legal_actions)
+    {
+        if (!tactical_only || is_capture_or_promotion(state, action))
+        {
+            actions.push_back(action);
+        }
+    }
+
+    std::sort(actions.begin(), actions.end(), [state](const Move &a, const Move &b) {
+        return move_order_score(state, a) > move_order_score(state, b);
+    });
+    return actions;
+}
+
+static std::vector<Move> filter_suicidal_actions(State *state, const std::vector<Move> &actions)
+{
+    std::vector<Move> safe_actions;
+    safe_actions.reserve(actions.size());
+
+    for (const auto &action : actions)
+    {
+        State *next = state->next_state(action);
+        next->get_legal_actions();
+        if (next->game_state != WIN)
+        {
+            safe_actions.push_back(action);
+        }
+        delete next;
+    }
+
+    return safe_actions.empty() ? actions : safe_actions;
+}
+
+static int quiescence(
+    State *state,
+    int alpha,
+    int beta,
+    GameHistory &history,
+    int ply,
+    SearchContext &ctx,
+    const MMParams &p)
+{
+    ctx.nodes++;
+    if (ply > ctx.seldepth)
+    {
+        ctx.seldepth = ply;
+    }
+    if (ctx.stop)
+    {
+        return 0;
+    }
+
+    if (state->legal_actions.empty() && state->game_state == UNKNOWN)
+    {
+        state->get_legal_actions();
+    }
+    if (state->game_state == WIN)
+    {
+        return P_MAX - ply;
+    }
+    if (state->game_state == DRAW)
+    {
+        return 0;
+    }
+
+    int rep_score;
+    if (state->check_repetition(history, rep_score))
+    {
+        return rep_score;
+    }
+
+    int stand_pat = state->evaluate(p.use_kp_eval, p.use_eval_mobility, &history);
+    if (stand_pat >= beta)
+    {
+        return stand_pat;
+    }
+    if (stand_pat > alpha)
+    {
+        alpha = stand_pat;
+    }
+    if (ply >= p.max_quiescence_ply)
+    {
+        return stand_pat;
+    }
+
+    history.push(state->hash());
+    int best_score = stand_pat;
+    auto actions = filter_suicidal_actions(state, ordered_actions(state, true));
+
+    for (auto &action : actions)
+    {
+        State *next = state->next_state(action);
+        bool same = next->same_player_as_parent();
+        int raw = same
+            ? quiescence(next, alpha, beta, history, ply + 1, ctx, p)
+            : quiescence(next, -beta, -alpha, history, ply + 1, ctx, p);
+        int score = same ? raw : -raw;
+        delete next;
+
+        if (score > best_score)
+        {
+            best_score = score;
+        }
+        if (score > alpha)
+        {
+            alpha = score;
+        }
+        if (alpha >= beta || ctx.stop)
+        {
+            break;
+        }
+    }
+
+    history.pop(state->hash());
+    return best_score;
 }
 
 /*============================================================
@@ -89,19 +277,18 @@ int MiniMax::eval_ctx(
 
     if (depth <= 0)
     {
-        int score = state->evaluate(
-            p.use_kp_eval, p.use_eval_mobility, &history);
+        int score = p.use_quiescence
+            ? quiescence(state, alpha, beta, history, ply, ctx, p)
+            : state->evaluate(p.use_kp_eval, p.use_eval_mobility, &history);
         history.pop(state->hash());
         return score;
     }
 
     /* === Alpha-beta negamax loop === */
     int best_score = M_MAX;
+    bool first_child = true;
 
-    auto actions = state->legal_actions;
-    std::sort(actions.begin(), actions.end(), [state](const Move &a, const Move &b) {
-        return move_order_score(state, a) > move_order_score(state, b);
-    });
+    auto actions = filter_suicidal_actions(state, ordered_actions(state, false));
 
     for (auto &action : actions)
     {
@@ -113,13 +300,31 @@ int MiniMax::eval_ctx(
 
         // [Hackathon TODO 3-3]
         // search the child one level deeper
-        int raw = same
-            ? eval_ctx(next, depth - 1, alpha, beta, history, ply + 1, ctx, p)
-            : eval_ctx(next, depth - 1, -beta, -alpha, history, ply + 1, ctx, p);
+        int raw;
+        if (first_child || !p.use_pvs)
+        {
+            raw = same
+                ? eval_ctx(next, depth - 1, alpha, beta, history, ply + 1, ctx, p)
+                : eval_ctx(next, depth - 1, -beta, -alpha, history, ply + 1, ctx, p);
+        }
+        else
+        {
+            raw = same
+                ? eval_ctx(next, depth - 1, alpha, alpha + 1, history, ply + 1, ctx, p)
+                : eval_ctx(next, depth - 1, -alpha - 1, -alpha, history, ply + 1, ctx, p);
+            int scout_score = same ? raw : -raw;
+            if (scout_score > alpha && scout_score < beta)
+            {
+                raw = same
+                    ? eval_ctx(next, depth - 1, alpha, beta, history, ply + 1, ctx, p)
+                    : eval_ctx(next, depth - 1, -beta, -alpha, history, ply + 1, ctx, p);
+            }
+        }
 
         // [Hackathon TODO 3-4]
         // convert raw to the current player's perspective.
         int score = same ? raw : -raw;
+        first_child = false;
 
         delete next;
 
@@ -164,6 +369,11 @@ SearchResult MiniMax::search(
         state->get_legal_actions();
     }
 
+    if (try_opening_book(state, result))
+    {
+        return result;
+    }
+
     if (state->game_state == WIN)
     {
         for (auto &action : state->legal_actions)
@@ -184,10 +394,7 @@ SearchResult MiniMax::search(
     int move_index = 0;
     int total_moves = (int)state->legal_actions.size();
 
-    auto actions = state->legal_actions;
-    std::sort(actions.begin(), actions.end(), [state](const Move &a, const Move &b) {
-        return move_order_score(state, a) > move_order_score(state, b);
-    });
+    auto actions = filter_suicidal_actions(state, ordered_actions(state, false));
 
     for (auto &action : actions)
     {
@@ -234,6 +441,9 @@ ParamMap MiniMax::default_params()
     return {
         {"UseKPEval", "true"},
         {"UseEvalMobility", "true"},
+        {"UsePVS", "true"},
+        {"UseQuiescence", "true"},
+        {"MaxQuiescencePly", "4"},
         {"ReportPartial", "true"},
     };
 }
@@ -243,6 +453,9 @@ std::vector<ParamDef> MiniMax::param_defs()
     return {
         {"UseKPEval", ParamDef::CHECK, "true"},
         {"UseEvalMobility", ParamDef::CHECK, "true"},
+        {"UsePVS", ParamDef::CHECK, "true"},
+        {"UseQuiescence", ParamDef::CHECK, "true"},
+        {"MaxQuiescencePly", ParamDef::SPIN, "4", 0, 30},
         {"ReportPartial", ParamDef::CHECK, "true"},
     };
 }
