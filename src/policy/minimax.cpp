@@ -137,6 +137,79 @@ static std::vector<Move> filter_suicidal_actions(State *state, const std::vector
     return safe_actions.empty() ? actions : safe_actions;
 }
 
+static int promotion_distance(const State *state, int player, int row)
+{
+    return player == 0 ? row : state->board_h() - 1 - row;
+}
+
+static bool is_passed_pawn(const State *state, int player, int row, int col)
+{
+    int opp = 1 - player;
+    int step = player == 0 ? -1 : 1;
+
+    for (int r = row + step; r >= 0 && r < state->board_h(); r += step)
+    {
+        for (int dc = -1; dc <= 1; dc++)
+        {
+            int c = col + dc;
+            if (c >= 0 && c < state->board_w() && state->piece_at(opp, r, c) == 1)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static int pawn_race_score(const State *state, int owner)
+{
+    int score = 0;
+    for (int r = 0; r < state->board_h(); r++)
+    {
+        for (int c = 0; c < state->board_w(); c++)
+        {
+            if (state->piece_at(owner, r, c) != 1)
+            {
+                continue;
+            }
+
+            int dist = promotion_distance(state, owner, r);
+            int advance = state->board_h() - 1 - dist;
+            int bonus = advance * advance * 3;
+
+            if (is_passed_pawn(state, owner, r, c))
+            {
+                bonus += 12 + advance * 8;
+            }
+            if (dist <= 2)
+            {
+                bonus += (3 - dist) * 45;
+            }
+            if (dist == 0)
+            {
+                bonus += 160;
+            }
+            score += bonus;
+        }
+    }
+    return score;
+}
+
+static int policy_evaluate(State *state, const MMParams &p, const GameHistory *history)
+{
+    int score = state->evaluate(p.use_kp_eval, p.use_eval_mobility, history);
+    if (!p.use_policy_endgame)
+    {
+        return score;
+    }
+
+    int self = state->player;
+    int opp = 1 - self;
+    score += pawn_race_score(state, self);
+    score -= pawn_race_score(state, opp);
+    return score;
+}
+
 static int quiescence(
     State *state,
     int alpha,
@@ -175,7 +248,7 @@ static int quiescence(
         return rep_score;
     }
 
-    int stand_pat = state->evaluate(p.use_kp_eval, p.use_eval_mobility, &history);
+    int stand_pat = policy_evaluate(state, p, &history);
     if (stand_pat >= beta)
     {
         return stand_pat;
@@ -279,7 +352,7 @@ int MiniMax::eval_ctx(
     {
         int score = p.use_quiescence
             ? quiescence(state, alpha, beta, history, ply, ctx, p)
-            : state->evaluate(p.use_kp_eval, p.use_eval_mobility, &history);
+            : policy_evaluate(state, p, &history);
         history.pop(state->hash());
         return score;
     }
@@ -443,6 +516,7 @@ ParamMap MiniMax::default_params()
         {"UseEvalMobility", "true"},
         {"UsePVS", "true"},
         {"UseQuiescence", "true"},
+        {"UsePolicyEndgame", "true"},
         {"MaxQuiescencePly", "4"},
         {"ReportPartial", "true"},
     };
@@ -455,6 +529,7 @@ std::vector<ParamDef> MiniMax::param_defs()
         {"UseEvalMobility", ParamDef::CHECK, "true"},
         {"UsePVS", ParamDef::CHECK, "true"},
         {"UseQuiescence", ParamDef::CHECK, "true"},
+        {"UsePolicyEndgame", ParamDef::CHECK, "true"},
         {"MaxQuiescencePly", ParamDef::SPIN, "4", 0, 30},
         {"ReportPartial", ParamDef::CHECK, "true"},
     };

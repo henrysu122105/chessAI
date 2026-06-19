@@ -8,6 +8,7 @@ struct MMParams {
     bool report_partial = true;
     bool use_pvs = true;
     bool use_quiescence = true;
+    bool use_policy_endgame = true;
     int max_quiescence_ply = 4;
 
     static MMParams from_map(const ParamMap& m){
@@ -17,6 +18,7 @@ struct MMParams {
         p.report_partial    = param_bool(m, "ReportPartial", true);
         p.use_pvs           = param_bool(m, "UsePVS", true);
         p.use_quiescence    = param_bool(m, "UseQuiescence", true);
+        p.use_policy_endgame = param_bool(m, "UsePolicyEndgame", true);
         p.max_quiescence_ply = param_int(m, "MaxQuiescencePly", 4);
         return p;
     }
